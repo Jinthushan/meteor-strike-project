@@ -151,8 +151,19 @@ class Meteor:
     def kinetic_energy(self):
         v = self.state[12:15] / self.mass
         speed = np.linalg.norm(v)
+        KE_linear = 0.5 * self.mass * speed**2
+
+        R = self.state[3:12].reshape([3,3])
+
+        I_world = R @ self.Ibody @ R.T
+
+        L = self.state[15:18]
         
-        return 0.5 * self.mass * speed**2
+        omega = np.linalg.inv(I_world) @ L
+
+        KE_ang = 0.5 * np.dot(omega, (I_world @ omega))
+
+        return KE_linear + KE_ang
     
     def step(self,dt):
         self.old_pos = self.state[0:3].copy()
