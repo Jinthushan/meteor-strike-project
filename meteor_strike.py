@@ -1,13 +1,25 @@
 import pygame, sys
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.integrate import ode
 import random
+import math
 
-BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
-GREEN = (0, 138, 22)
-BLUE = (97, 194, 250)
+NIGHT_SKY = (10, 14, 40)
+ROCK_GRAY = (89, 89, 92)
+ROCK_DARKGRAY = (60, 60, 61)
+
+CRATER_LINE_BROWN = (61, 50, 40)
+CRATER_BROWN = (43, 36, 29)
+CRATER_LIGHT = (71, 59, 53)
+
+g = 9.8
+floor_density = 2000
+
+win_width = 1200
+win_height = 700
+
+floor_height = 150
+grass_height = win_height - floor_height
 
 seed = 43
 np.random.seed(seed)
@@ -26,7 +38,7 @@ class Meteor:
         
         self.radius = radius
         self.mass = mass
-        #(1/4) * (self.mass) * (self.radius**2)
+
         Ixx = (1/2) * (self.mass) * (self.radius**2)
         Iyy = Ixx
         Izz = Ixx
@@ -39,7 +51,7 @@ class Meteor:
         self.body_matrix = np.array([-self.radius*2,0,0])
 
         self.IbodyInv = np.linalg.inv(self.Ibody)  # inverse of inertia tensor
-        self.v = np.array([[self.vx,self.vy,0]])    
+        self.v = np.array([self.vx,self.vy,0])    
         #self.omega = np.array([0,0,0])   # angular velocity
 
         self.omega = np.array([0,0,3*Izz]) 
@@ -50,11 +62,9 @@ class Meteor:
         self.state[12:15] = self.mass * self.v            # linear momentum
         self.state[15:18] = self.omega                # angular momentum
 
-        # Computed quantities
         self.force = np.zeros(3)
         self.torque = np.zeros(3)
 
-        # Setting up the solver
         self.solver = ode(self.f)
         self.solver.set_integrator('dop853')
         self.solver.set_f_params(self.force, self.torque, self.IbodyInv)
@@ -130,32 +140,154 @@ class Meteor:
     def get_pos(self):
         return self.state[0:3]
 
-    def get_rot(self):
-        return self.state[3:12].reshape([3,3])
-
     def get_angle_2d(self):
         v1 = [1,0,0]
         v2 = np.dot(self.state[3:12].reshape([3,3]), v1)
-        cosang = np.dot(v1, v2)
-        axis = np.cross(v1, v2)
-        return np.degrees(np.arccos(cosang)), axis
 
-    def prn_state(self):
-        print('Pos', self.state[0:3])
-        print('Rot', self.state[3:12].reshape([3,3]))
-        print('P', self.state[12:15])
-        print('L', self.state[15:18])
+        angle = np.degrees(np.arctan2(v2[1],v2[0]))
+
+        return angle
+    
+    def kinetic_energy(self):
+        v = self.state[12:15] / self.mass
+        speed = np.linalg.norm(v)
+        
+        return 0.5 * self.mass * speed**2
+    
+    def step(self,dt):
+        self.old_pos = self.state[0:3].copy()
+        self.solver.integrate(self.solver.t + dt)
+        self.state = self.solver.y
+
+class Terrain:
+    def __init__(self,width,height,ground_y):
+        self.width = width
+        self.height = height
+        self.ground_y = ground_y
+        
+        self.heights = np.full(width,float(ground_y))
+    
+    def draw_crater(self, surface):
+        for x in range(self.width):
+            screen_y = int(self.heights[x])
+            if screen_y > self.ground_y:
+                pygame.draw.line(surface,CRATER_LIGHT, (x,self.ground_y), (x, screen_y))
+
+    def make_crater(self, impact_x, diameter):
+        radius = int(diameter/2)
+
+        depth = max(6,(diameter) * 0.35)
+        
+        x0 = int(impact_x - radius)
+        x1 = int(impact_x + radius)
+
+        for x in range(max(0,x0), min(self.width,x1+1)):
+            dx = x - impact_x 
+            frac = dx / radius
+            dip = depth * (1-frac**2)
+            new_y = self.heights[x] + dip
+            if new_y > self.heights[x]:
+                self.heights[x] = new_y
+    
+    def surface_y_at(self,x):
+        xi = int(np.clip(x,0,self.width - 1))
+        return self.heights[xi]
+    
+    def draw(self, surface):
+        points = []
+        for x in range(self.width):
+            points.append((x,int(self.heights[x])))
+        points.append((self.width, self.height))
+        points.append((0,self.height))
+
+        pygame.draw.polygon(surface,CRATER_BROWN, points)
+        
+        edge = [(x, int(self.heights[x])) for x in range(self.width)]
+        if len(edge) >= 2:
+            pygame.draw.lines(surface, CRATER_LINE_BROWN, False, edge, 2)
+
+def pos_to_screen(x,y):
+    return int(x), int(grass_height - y)
+
+def screen_to_pos(x,y):
+    return float(x), float(grass_height - y)
+
+def spawn_fragments(meteor, count):
+    frags = []
+
+    main_v = np.array([meteor.vx, meteor.vy,0.0])
+
+    KE_total = meteor.kinetic_energy()
+    ke_loss = 0.1
+    r = meteor.radius / count
+
+    fragment_mass = meteor.mass/count 
+
+    for _ in range(count):
+        angle = random.uniform(math.pi/6, math.pi)
+        direction = np.random.choice([-1, 1])
+
+        ke_frag = (KE_total * (1-ke_loss))/count
+
+        speed = np.sqrt(2 * ke_frag / fragment_mass)
+
+        vx = direction * speed * np.cos(angle) + main_v[0]
+        vy = speed * np.sin(angle) + main_v[1]
+
+        f = Meteor(meteor.state[0], meteor.state[1] + 75, vx, vy, r, fragment_mass)
+        f_img = MeteorImage(win_height, r, is_fragment = True)
+
+        f.isfragment = True
+        f.solver.set_initial_value(f.state, meteor.solver.t)
+        frags.append([f,f_img])
+
+    return frags
 
 class MeteorImage(pygame.sprite.Sprite):
-    def __init__(self, screen_height, imgfile):
+    def __init__(self, screen_height, radius, is_fragment = False):
         pygame.sprite.Sprite.__init__(self)
-        self.image = pygame.image.load(imgfile).convert_alpha()
-        self.rect = self.image.get_rect()
-        self.pos = (0,0)
-        self.image_rot = self.image
-        self.screen_height = screen_height
+        
         self.alpha = 255
+        self.pos = (0,0)
+        
+        self.is_fragment = is_fragment
+        self.radius = radius
 
+        self.image = self.draw_fragment(radius) if is_fragment else self.draw_meteor(radius)
+        self.image_rot = self.image.copy()
+
+    def draw_meteor(self,radius):
+        size = radius * 5
+        surface = pygame.Surface((size,size), pygame.SRCALPHA)
+    
+        circle_x = size // 2
+        circle_y = size // 2 
+
+        pygame.draw.circle(surface,ROCK_GRAY, (circle_x,circle_y), radius)
+
+        hole_x = int(radius * 0.25)
+        hole_y = int(radius * 0.2)
+        hole_r = int(radius * 0.45)
+
+        hole_center = (circle_x + hole_x, circle_y + hole_y)
+
+        pygame.draw.circle(surface, ROCK_DARKGRAY, hole_center, hole_r)
+
+        return surface
+
+    def draw_fragment(self,radius):
+        size = radius * 4
+        surf = pygame.Surface((size,size), pygame.SRCALPHA)
+
+        x = size // 2
+        y = size // 2
+
+        points = [(x,y-radius), (x-radius, y + radius), (x+radius, y+radius)]
+
+        pygame.draw.polygon(surf, ROCK_GRAY, points)
+
+        return surf
+    
     def rotate(self, angle):
         self.image_rot = pygame.transform.rotate(self.image, angle)
 
@@ -169,157 +301,140 @@ class MeteorImage(pygame.sprite.Sprite):
         self.image_rot.set_alpha(self.alpha)
         surface.blit(self.image_rot, rect)
 
-def update(meteor, meteor_image , dt,win_height):
-    meteor.state = meteor.solver.integrate(meteor.solver.t + dt)
-        
-    angle, axis = meteor.get_angle_2d()
-    if axis[2] < 0:
-        angle *= -1.
-    meteor_image.rotate(angle)
-
-    pos = meteor.get_pos()
-   
-    screen_x = pos[0]
-    screen_y = win_height - pos[1]
-    meteor_image.pos = (screen_x,screen_y)
-
-def collision_handling(meteor, meteor_image, surface, floor_height, win_height ,floor_density,meteors):
-    pos = meteor.get_pos()
-    meteor_bottom = pos[1] - meteor.radius
+def crater_dia(KE):
+    raw = 1.161*((KE)/(floor_density*g))**(0.25)
     
-    if meteor.crashed and meteor_image.alpha > 0:
-        meteor_image.set_alpha(meteor_image.alpha - 5)
+    return raw*6
 
-    if meteor_bottom <= floor_height:
-            
-            if meteor.crashed == False and meteor.isfragment == False:
-                create_fragments(meteor,meteor_image,meteors)
+def step_body(body,dt,terrain):
+    body.step(dt)
+    pos = body.get_pos()
+    x_screen ,y_screen = pos_to_screen(pos[0], pos[1])
+    terrain_y = terrain.surface_y_at(x_screen)
 
-            vel = meteor.state[12:15] /meteor.mass
-            speed = np.linalg.norm(vel)
-            KE = (0.5)*meteor.mass*(speed**2)
-            crater_dia = int(1.161 * (KE /(floor_density*9.8))**(1/4))
+    v = body.state[12:15] / body.mass
+    
+    hit = y_screen >= terrain_y and v[1] < 0
 
-            meteor.state[1] = 100 + meteor.radius
-            meteor.state[12:15] = np.zeros(3)
-            meteor.state[15:18] = np.zeros(3)
-            meteor_image.image = pygame.image.load('explosion.png').convert_alpha()
-
-            meteor.crashed = True
-
-            crater_x = pos[0]
-            grass_height = win_height - floor_height
-            crater_y = grass_height
-
-            scaling = 35
-
-            crater_dia *= scaling
-
-            pygame.draw.circle(surface,BLUE, (crater_x,crater_y), crater_dia // 2)
-
-            
-
-def create_fragments(main_meteor,meteor_image,meteors):
-    num_fragments = np.random.randint(2,4)
-
-    total_mass = main_meteor.mass
-    v = main_meteor.state[12:15]/main_meteor.mass
-    total_ke = (1/2)* total_mass *np.linalg.norm(v)**2
-
-    fragment_mass = total_mass/num_fragments
-
-    angles = np.random.uniform(np.radians(30),np.radians(180), num_fragments)
-    print(angles)
-    velocities = []
-
-    for angle in angles:
-        ke_loss = 0.05
-        ke_fragment = (total_ke / num_fragments)*(ke_loss)
-
-        speed = np.sqrt(2*ke_fragment/fragment_mass)
-
-        direction = np.random.choice([-1,1])
-
-        vx = direction*speed * np.cos(angle) + v[0]
-        vy = speed * np.sin(angle)
-        velocities.append([vx,vy,0])
-
-    fragments = []
-    for vel in velocities:
-        x = main_meteor.state[0]
-        y = main_meteor.state[1] + 100
-        vx = vel[0]
-        vy = vel[1]
-        radius = max(5, int(main_meteor.radius * (fragment_mass/total_mass)**(1/3)))
-        mass = fragment_mass
-        fragment = Meteor(x,y,vx,vy,radius,mass)
-
-        fragment.solver.set_initial_value(fragment.state,main_meteor.solver.t)
-        frag_image_type = random.randint(1,2)
-        fragment_image = MeteorImage(meteor_image.screen_height, f'fragment_{frag_image_type}.png')
-
-        fragment.isfragment = True
-
-        meteors.append([fragment,fragment_image])
+    return x_screen,y_screen,terrain_y, hit
 
 def main():
+    sim_time = 0
+
     pygame.init()
     clock = pygame.time.Clock()
 
-    win_width = 1500
-    win_height = 1000
     screen = pygame.display.set_mode((win_width, win_height))
-    screen_center = np.array([win_width/2,win_height/2])
     pygame.display.set_caption('METEOR STRIKE')
 
     meteors = []
+    fragments = []
+    terrain = Terrain(win_width,win_height, grass_height)
 
-    meteor_image = MeteorImage(win_height, 'meteor_no_trail_small.png')
-    meteor = Meteor(x=350,y=900,vx=50,vy=-100,radius=20,mass=1000)
+    sky_surface = pygame.Surface((win_width, grass_height))
+    sky_surface.fill(NIGHT_SKY)
 
-    meteors.append([meteor,meteor_image])
+    meteor = Meteor(x=150,y=650,vx=50,vy=-100,radius=20,mass=100000)
+    meteor_img = MeteorImage(win_height,20,False)
 
-    cur_time = 0.0
-    dt = 0.1
+    meteor2 = Meteor(x=950,y=700,vx=0,vy=-100,radius=20,mass=100000)
+    meteor_img2 = MeteorImage(win_height,20,False)
+
+    meteors.append([meteor,meteor_img])
+    meteors.append([meteor2,meteor_img2])
 
     for meteor,_ in meteors:
-        meteor.solver.set_initial_value(meteor.state, cur_time)
-
-    surface = pygame.Surface((win_width,win_height))
-    surface.fill(BLUE)
-
-    floor_height = 150
-    grass_height = win_height - floor_height
-
-    pygame.draw.rect(surface,GREEN, pygame.Rect(0,grass_height, win_width, floor_height))
-
-    floor_density = 2500
+        meteor.solver.set_initial_value(meteor.state, sim_time)
 
     while True:
         # 30 fps
-        clock.tick(30)
-
+        dt = clock.tick(60) /1000
+        sim_time += dt
+        
         event = pygame.event.poll()
         if event.type == pygame.QUIT:
             pygame.quit()
             sys.exit(0)
-        elif event.type == pygame.KEYDOWN and event.key == pygame.K_q:
-            pygame.quit()
-            sys.exit(0)
-        else:
-            pass
 
-        cur_time += dt
+        to_remove_meteors = []
+        new_frags = []
 
-        for meteor, meteor_image in meteors:
-            update(meteor, meteor_image,dt,win_height)
-            collision_handling(meteor,meteor_image,surface, floor_height,win_height ,floor_density,meteors)
+        for m, img in meteors:
+            if m.crashed == True:
+                to_remove_meteors.append([m,img])
+                continue
+            cur_x, cur_y , terrain_y,hit = step_body(m,dt,terrain)
 
-        screen.blit(surface, (0,0))
+            if hit == True:
+                m.crashed = True
+                KE = m.kinetic_energy()
+                dia = crater_dia(KE)
+                terrain.make_crater(cur_x,dia)
         
-        for meteor,meteor_image in meteors:
-            meteor_image.draw(screen)
+                n_frags = random.randint(4,9)
+            
+                screen_x, screen_y = screen_to_pos(cur_x,int(terrain_y))
 
+                new_frags += spawn_fragments(m,n_frags)
+                to_remove_meteors.append([m,img])
+        
+        for meteor in to_remove_meteors:
+            if meteor in meteors:
+                meteors.remove(meteor)
+
+        fragments += new_frags    
+
+
+        to_remove_f = []
+        for f,img in fragments:
+            if f.crashed:
+                to_remove_f.append([f,img])
+                continue
+            
+            cur_x,cur_y, terrain_y, hit = step_body(f,dt,terrain)
+        
+            if hit:
+                f.crashed = True
+                KE = f.kinetic_energy()
+                dia = crater_dia(KE)
+                dia *= 0.5
+                terrain.make_crater(cur_x, dia)
+                
+                to_remove_f.append([f,img])
+        
+        for f in to_remove_f:
+            if f in fragments:
+                fragments.remove(f)
+
+        screen.blit(sky_surface, (0,0))
+        
+        
+        for m,img in meteors:
+            pos = m.get_pos()
+
+            screen_x,screen_y = pos_to_screen(pos[0],pos[1])
+
+            img.pos = (screen_x,screen_y)
+
+            angle = m.get_angle_2d()
+            img.rotate(angle)
+
+            img.draw(screen)
+
+        terrain.draw_crater(screen)
+
+        for f,img in fragments:
+            pos = f.get_pos()
+            x,y = pos_to_screen(pos[0],pos[1])
+
+            img.pos = (x,y)
+
+            angle = f.get_angle_2d()
+            img.rotate(angle)
+            img.draw(screen)
+        
+        terrain.draw(screen)
+        
         pygame.display.update()
 
 if __name__ == '__main__':
