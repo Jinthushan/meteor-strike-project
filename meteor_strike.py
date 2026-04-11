@@ -91,7 +91,7 @@ class Meteor:
 
         F_drag = -C2 * speed * v
 
-        force = F_grav + F_drag
+        force = F_grav - C2
 
         point_worldframe = center_mass + _R @ self.body_matrix
 
