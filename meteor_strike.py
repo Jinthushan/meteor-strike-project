@@ -325,7 +325,7 @@ def step_body(body,dt,terrain):
 
     v = body.state[12:15] / body.mass
     
-    hit = y_screen >= terrain_y and v[1] < 0
+    hit = y_screen >= terrain_y
 
     return x_screen,y_screen,terrain_y, hit
 
